@@ -188,30 +188,38 @@ def get_reconstructed_scene(outdir, gradio_delete_cache, model, device, silent, 
     return scene_state, outfile
 
 
-def set_scenegraph_options(inputfiles, win_cyclic, refid, scenegraph_type):
+def set_scenegraph_options(inputfiles, win_cyclic_value, refid_value, scenegraph_type_value):
     num_files = len(inputfiles) if inputfiles is not None else 1
-    show_win_controls = scenegraph_type in ["swin", "logwin"]
-    show_winsize = scenegraph_type in ["swin", "logwin"]
-    show_cyclic = scenegraph_type in ["swin", "logwin"]
+    show_win_controls = scenegraph_type_value in ["swin", "logwin"]
+    show_winsize = scenegraph_type_value in ["swin", "logwin"]
+    show_cyclic = scenegraph_type_value in ["swin", "logwin"]
     max_winsize, min_winsize = 1, 1
-    if scenegraph_type == "swin":
-        if win_cyclic:
+
+    if scenegraph_type_value == "swin":
+        if win_cyclic_value:
             max_winsize = max(1, math.ceil((num_files - 1) / 2))
         else:
             max_winsize = num_files - 1
-    elif scenegraph_type == "logwin":
-        if win_cyclic:
-            half_size = math.ceil((num_files - 1) / 2)
+    elif scenegraph_type_value == "logwin":
+        if win_cyclic_value:
+            half_size = max(1, math.ceil((num_files - 1) / 2))
             max_winsize = max(1, math.ceil(math.log(half_size, 2)))
         else:
             max_winsize = max(1, math.ceil(math.log(num_files, 2)))
-    winsize = gradio.Slider(label="Scene Graph: Window Size", value=max_winsize,
-                            minimum=min_winsize, maximum=max_winsize, step=1, visible=show_winsize)
-    win_cyclic = gradio.Checkbox(value=win_cyclic, label="Cyclic sequence", visible=show_cyclic)
-    win_col = gradio.Column(visible=show_win_controls)
-    refid = gradio.Slider(label="Scene Graph: Id", value=0, minimum=0,
-                          maximum=num_files - 1, step=1, visible=scenegraph_type == 'oneref')
-    return win_col, winsize, win_cyclic, refid
+    else:
+        max_winsize = 1  # default for other scenegraph types
+
+    # Ensure the current value is within the new min/max range
+    current_winsize_value = min(win_cyclic_value, max_winsize)
+
+    # Create updates for each component
+    winsize_update = gradio.update(visible=show_winsize, minimum=min_winsize, maximum=max_winsize, value=min(max_winsize, current_winsize_value))
+    win_cyclic_update = gradio.update(visible=show_cyclic, value=win_cyclic_value)
+    win_col_update = gradio.update(visible=show_win_controls)
+    refid_update = gradio.update(visible=(scenegraph_type_value == 'oneref'), minimum=0, maximum=num_files - 1, value=min(refid_value, num_files - 1))
+
+    return win_col_update, winsize_update, win_cyclic_update, refid_update
+
 
 
 def main_demo(tmpdirname, model, device, image_size, server_name, server_port, silent=False,
@@ -264,10 +272,10 @@ def main_demo(tmpdirname, model, device, image_size, server_name, server_port, s
                                                           interactive=True)
                         with gradio.Column(visible=False) as win_col:
                             winsize = gradio.Slider(label="Scene Graph: Window Size", value=1,
-                                                    minimum=1, maximum=1, step=1)
-                            win_cyclic = gradio.Checkbox(value=False, label="Cyclic sequence")
-                        refid = gradio.Slider(label="Scene Graph: Id", value=0,
-                                              minimum=0, maximum=0, step=1, visible=False)
+                                        minimum=1, maximum=10, step=1, visible=False)
+                            win_cyclic = gradio.Checkbox(value=False, label="Cyclic sequence", visible=False)
+                        refid = gradio.Slider(label="Scene Graph: Id", value=0, minimum=0,
+                                  maximum=0, step=1, visible=False)
             run_btn = gradio.Button("Run")
 
             with gradio.Row():
