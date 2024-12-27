@@ -7,8 +7,8 @@ from typing import Dict, List
 from pathlib import Path
 
 def visualize_correspondences(
-    image_0: torch.Tensor,
-    image_1: torch.Tensor,
+    img0: torch.Tensor,
+    img1: torch.Tensor,
     coords_0: np.ndarray,
     coords_1: np.ndarray,
     points_correlation: int = 20,
@@ -18,20 +18,20 @@ def visualize_correspondences(
     Visualize the correspondences between two images by drawing matching lines.
     
     Args:
-        image_0 (torch.Tensor): The first image tensor of shape (1, 3, H, W).
-        image_1 (torch.Tensor): The second image tensor of shape (1, 3, H, W).
+        image_0 (torch.Tensor): The first image tensor of shape (H, W, 3).
+        image_1 (torch.Tensor): The second image tensor of shape (H, W, 3).
         coords_0 (np.ndarray): Coordinates in the first image, shape (N, 2).
         coords_1 (np.ndarray): Coordinates in the second image, shape (N, 2).
         points_correlation (int): How many random correspondences to visualize.
         save_path (str): Where to save the final visualization.
     """
-    # Convert the tensors to NumPy (H, W, C)
-    img0 = (image_0.squeeze(0).permute(1, 2, 0).cpu().numpy() + 1 )/2
-    img1 = (image_1.squeeze(0).permute(1, 2, 0).cpu().numpy() + 1 )/2
     
     # Pick 'points_correlation' random indices
     assert len(coords_0) == len(coords_1), "coords_0 and coords_1 must have the same length."
-    indices = [randint(0, len(coords_0) - 1) for _ in range(points_correlation)]
+    if points_correlation > 0: 
+        indices = [randint(0, len(coords_0) - 1) for _ in range(points_correlation)]
+    else:
+        indices = range(len(coords_0))
     coords_0_sub = coords_0[indices]
     coords_1_sub = coords_1[indices]
     
@@ -65,10 +65,10 @@ def visualize_correspondences(
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
-    plt.show()
+    plt.close(fig)
     
     
-def show_anns(image_cv2: np.ndarray, anns: List[Dict], figure_location: Path, alpha: float = 0.35):
+def show_anns(image_cv2: np.ndarray, anns: List[np.ndarray], figure_location: Path, alpha: float = 0.35):
     
     
     fig, ax = plt.subplots()
@@ -78,16 +78,14 @@ def show_anns(image_cv2: np.ndarray, anns: List[Dict], figure_location: Path, al
     
     if len(anns) == 0:
         return
-    sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
-    print(len(sorted_anns))
     ax = plt.gca()
     ax.set_autoscale_on(False)
 
-    img = np.ones((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 4))
+    img = np.ones((anns[0].shape[0], anns[0].shape[1], 4))
     img[:, :, 3] = 0
-    for ann in sorted_anns:
-        m = ann['segmentation']
+    for ann in anns:
         color_mask = np.concatenate([np.random.random(3), [alpha]])
-        img[m] = color_mask
+        img[ann] = color_mask
     ax.imshow(img)
     plt.savefig(figure_location)
+    plt.close()

@@ -19,9 +19,8 @@ def distribute_points_among_masks(masks, total_points=100):
                             across *all* masks.
                             
     Returns:
-        mask_prompts (List[np.ndarray]): 
-            A list of arrays; each array is shape (k_i, 2) containing 
-            the (x, y) cluster centers for mask i.
+        mask_size (np.ndarray): 
+            An arrays containing the size of each mask, shape (k).
             
         all_prompts (np.ndarray): 
             A concatenation of all cluster centers from all masks, shape (N', 2).
@@ -32,7 +31,7 @@ def distribute_points_among_masks(masks, total_points=100):
     if total_area <= 0:
         return [], np.zeros((0, 2), dtype=np.int32)
     
-    mask_prompts = []
+    mask_size = []
     all_prompts_list = []
     
     for m in masks:
@@ -73,7 +72,7 @@ def distribute_points_among_masks(masks, total_points=100):
         # Round/convert to integer pixel coords
         cluster_centers = cluster_centers.astype(np.int32)
         
-        mask_prompts.append(cluster_centers)
+        mask_size.append(len(cluster_centers))
         all_prompts_list.append(cluster_centers)
     
     # 5) Concatenate all prompt points across all masks
@@ -82,7 +81,7 @@ def distribute_points_among_masks(masks, total_points=100):
     else:
         all_prompts = np.zeros((0, 2), dtype=np.int32)
     
-    return mask_prompts, all_prompts
+    return mask_size, all_prompts
 
 def visualize_mask_points(first_image_cv2, mask_points_list, cmap_name='rainbow'):
     """
