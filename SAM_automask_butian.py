@@ -65,6 +65,13 @@ if __name__ == '__main__':
 
     first_image_cv2 = cv2.imread(first_image_path)
     first_image_cv2 = cv2.cvtColor(first_image_cv2, cv2.COLOR_BGR2RGB)
+    
+    image_files = sorted([f for f in os.listdir(image_directory) if f.endswith('.jpg', '.png', '.jpeg', '.JPG', '.PNG', '.JPEG')])        
+    # Load the current image
+    current_image_path = os.path.join(image_directory, image_files[i + 1])
+    current_image_cv2 = cv2.imread(current_image_path)
+    current_image_cv2 = cv2.cvtColor(current_image_cv2, cv2.COLOR_BGR2RGB)   # or reload from disk at original size
+    
     ori_H, ori_W = first_image_cv2.shape[:2]
     sam = sam_model_registry[sam_version](checkpoint=sam_checkpoints)
     predictor = SamPredictor(sam)
@@ -85,6 +92,7 @@ if __name__ == '__main__':
     masks = merge_masks(masks, threshold=0.5)
     
     mask_size, centers_first_img = distribute_points_among_masks(masks) # in the shape of H,W
+    
     
     
 
@@ -123,8 +131,8 @@ if __name__ == '__main__':
 
             
         ## TO DO: Loading the CV2 version image (or convert the current image format image -> CV2 image)as what we have done in line 67 and line 68
-        current_image_cv2 = cv2.imread(os.path.join(image_directory, f"{i+1:05d}.jpg"))
-        current_image_cv2 = cv2.cvtColor(current_image_cv2, cv2.COLOR_BGR2RGB)   # or reload from disk at original size
+        # Filter for jpg files and sort the directory
+        
         ## TO DO: Loading the CV2 version image (or convert the current image format image -> CV2 image)as what we have done in line 67 and line 68
          
         if debugging:
@@ -137,7 +145,12 @@ if __name__ == '__main__':
         final_sam_masks = prompt_sam_with_mask_points(
             current_image_cv2, predictor, coordinates_1, multimask_output=False
         )
-        ## TO DO: Visualize the Final Result, each image should be visualized
+
+
         out_path = f"{output_dir}/masks/{i}.png"
         show_anns(current_image_cv2, final_sam_masks, alpha=0.35, figure_location=out_path)
-        ## TO DO: Visualize the Final Result, each image should be visualized
+        
+        ## TO DO: Instead of saving the mask, we use the final_sam_mask as the target need to compare with the ground truth mask
+        ## TO DO: Save Several Masks for visualization and measurement
+        ## TO DO: Print out the Metrics 
+         
