@@ -1,14 +1,15 @@
-from time import time
-import argparse
-from skimage import io
-from sklearn.metrics import jaccard_score,f1_score,auc
+# from time import time
+# import argparse
+# from skimage import io
+# from sklearn.metrics import jaccard_score,f1_score,auc
+# import numpy as np
+# import pandas as pd
+# from davis2017.evaluation import DAVISEvaluation
+# from tqdm import tqdm
+# # from skimage import io, color
+# import pandas as pd
+# import os
 import numpy as np
-import pandas as pd
-from davis2017.evaluation import DAVISEvaluation
-from tqdm import tqdm
-from skimage import io, color
-import pandas as pd
-import os
 
 # def parser():
 #     parser = argparse.ArgumentParser(description="Calculate metrics for datasets.")
@@ -22,66 +23,67 @@ def copyGT(gt, pred):
         copiedGT[i,:,:] = gt
     return copiedGT
 
-def Cal_IOU(gt_dir, pred_dir):
-    gts = np.load(gt_dir)
-    preds = np.load(pred_dir)
-    counter = 0
-    IOUS = list()
-    F1 = list()
-    PRECISION = list()
-    RECALL = list()
-    copiedGT = dict()
-    for key, value in gts.items():
-        name = list(preds)[counter]
-        pred = preds[name]
-        value = np.array(value, dtype=np.int32)
-        pred = np.array(pred, dtype=np.int32)
-       
-        #复制B个一样的GT
-        copiedGT[key] = copyGT(value, pred)
-        AND = np.bitwise_and(value, pred)
-        Union = np.bitwise_or(value, pred)
+
+def calculateMetrics(gt, preds):
+    max_iou = 0
+    for i in range(np.array(preds).shape[0]):  
+        mask = preds[i]
         
-        sum_AND = np.sum(AND, axis=(1, 2)) # True positive (B,)
-        sum_UNION = np.sum(Union, axis=(1,2))
-        sum_pred = np.sum(pred, axis=(1,2)) #TP + FP 
-        sum_value = np.sum(copiedGT[key], axis=(1,2)) #TP + FN
+        intersection = np.sum(np.bitwise_and(gt, mask))  
+        union = np.sum(np.bitwise_or(gt, mask))  
+        
+        iou = intersection / union if union != 0 else 0
+        if iou > max_iou:
+            max_iou = iou
+
+            # calculate precision and recall
+            true_positive = intersection
+            predicted_positive = np.sum(mask)  # TP + FP
+            actual_positive = np.sum(gt)      # TP + FN
+
+            precision = true_positive / predicted_positive if predicted_positive != 0 else 0
+            recall = true_positive / actual_positive if actual_positive != 0 else 0
+
+            # calculate f-value
+            f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) != 0 else 0
+
+    if max_iou == 0:
+        precision = 0
+        recall = 0
+        f1 = 0
+    return max_iou, f1, precision, recall
+
+# def Cal_IOU(gt, preds):
+#     #复制B个一样的GT
+#     copiedGT = copyGT(gt, preds)
+#     AND = np.bitwise_and(copiedGT, preds)
+#     Union = np.bitwise_or(copiedGT, preds)
+        
+#     sum_AND = np.sum(AND, axis=(1, 2)) # True positive (B,)
+#     sum_UNION = np.sum(Union, axis=(1,2))
+#     sum_pred = np.sum(preds, axis=(1,2)) #TP + FP 
+#     sum_value = np.sum(copiedGT, axis=(1,2)) #TP + FN
         
         
-        # 计算IoU
-        IOU = sum_AND / sum_UNION
+#     # 计算IoU
+#     IOU = sum_AND / sum_UNION
 
-        # 计算Precision和Recall
-        precision = sum_AND / sum_pred  # 计算所有的Precision值
-        recall = sum_AND / sum_value      # 计算所有的Recall值
+#      # 计算Precision和Recall
+#     precision = sum_AND / sum_pred  # 计算所有的Precision值
+#     recall = sum_AND / sum_value      # 计算所有的Recall值
 
-        # 在计算好的IoU值中选择满足条件的值
-        valid_iou = [iou for iou in IOU if 0.4 <= iou <= 0.6]
-        selected_iou = np.random.choice(valid_iou) if valid_iou else None
-        IOUS.append(selected_iou)
-        # 在计算好的Precision值中选择满足条件的值
-        valid_precision = [p for p in precision if 0.5 <= p <= 0.7]
-        selected_precision = np.random.choice(valid_precision) if valid_precision else None
 
-        # 在计算好的Recall值中选择满足条件的值
-        valid_recall = [r for r in recall if 0.5 <= r <= 0.7]
-        selected_recall = np.random.choice(valid_recall) if valid_recall else None
+#     # 计算F1值
+#     if precision is not None and recall is not None:
+#         f1 = 2 * precision * recall / (precision + recall)
+#     else:
+#         f1 = 0  # 如果没有有效值则设为0
 
-        # 计算F1值
-        if selected_precision is not None and selected_recall is not None:
-            f1 = 2 * selected_precision * selected_recall / (selected_precision + selected_recall)
-        else:
-            f1 = 0  # 如果没有有效值则设为0
-
-        # 处理可能的NaN值
-        f1 = np.nan_to_num(f1)  # 将NaN替换为0
-        PRECISION.append(selected_precision)
-        RECALL.append(selected_recall)
-        F1.append(f1)
+#     # 处理可能的NaN值
+#     f1 = np.nan_to_num(f1)  # 将NaN替换为0
         
-        counter+=1
 
-    return np.mean(IOUS), np.mean(F1), np.mean(PRECISION),np.mean(RECALL)
+#     return IOU, f1, precision,recall
 
     
 def update_csv(filename, data):
