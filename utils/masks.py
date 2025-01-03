@@ -1,82 +1,49 @@
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import numpy as np
-from sklearn.cluster import KMeans
+from typing import List, Dict
 
-def distribute_points_among_masks(masks, total_points=100):
+from scipy import ndimage
+
+import numpy as np
+from cuml.cluster import KMeans as cuKMeans
+
+def distribute_points_among_masks(masks: np.ndarray, total_points: int = 100):
     """
-    Distribute `total_points` among the given list of mask dictionaries 
+    Distribute `total_points` among the given list of mask arrays 
     proportionally to each mask's area, and cluster points within each 
-    mask using K-Means.
+    mask using GPU-accelerated K-Means.
     
     Args:
-        masks (List[dict]): A list of mask dictionaries.
-            Each dictionary has keys like:
-               - 'segmentation': (H, W) boolean array
-               - 'area': float
-               - ... possibly other keys
-        total_points (int): The total number of prompt points we want to sample
-                            across *all* masks.
-                            
-    Returns:
-        mask_size (np.ndarray): 
-            An arrays containing the size of each mask, shape (k).
-            
-        all_prompts (np.ndarray): 
-            A concatenation of all cluster centers from all masks, shape (N', 2).
-            Where N' ≈ total_points.
-    """
-    # 1) Compute total area of all masks
-    total_area = sum(m['area'] for m in masks)
-    if total_area <= 0:
-        return [], np.zeros((0, 2), dtype=np.int32)
+        masks (np.ndarray): A boolean mask of shape (k, H, W) where k is the number of masks.
+        total_points (int): The total number of prompt points to sample across all masks.
     
+    Returns:
+        mask_size (np.ndarray): An array containing the size of each mask's prompt points, shape (k).
+        all_prompts (np.ndarray): A concatenation of all cluster centers from all masks, shape (N', 2).
+    """
     mask_size = []
     all_prompts_list = []
+    total_area = masks.sum()
     
-    for m in masks:
-        area_m = m['area']
-        seg = m['segmentation']  # boolean numpy array of shape (H, W)
-        
-        # 2) Determine how many prompts to allocate to this mask
-        #    proportional to area
-        frac = area_m / total_area
-        k_m = int(round(frac * total_points))
-        
-        # Optionally enforce min. or max. prompts per mask
-        # e.g. at least 1 if there's enough area
-        # or skip if k_m == 0:
-        if k_m < 1:
+    for mask in masks:
+        area_m = mask.sum()
+        k = int(area_m / total_area * total_points)
+        if k == 0:
             continue
-        
-        # 3) Collect all (x, y) points in the mask
-        #    m['segmentation'] = True where the pixel belongs to the mask
-        ys, xs = np.where(seg == True)
-        if len(xs) == 0 or len(ys) == 0:
-            # no pixels in mask
-            continue
-        
-        # Convert to float, shape (num_pixels, 2)
+        ys, xs = np.where(mask)
         coords = np.column_stack((xs, ys)).astype(np.float32)
-        
-        # 4) If the # of mask pixels < k_m, we trivially use all points
-        #    or simply reduce k_m to len(coords)
-        if len(coords) <= k_m:
-            cluster_centers = coords
+        if len(coords) <= k:
+            cluster_centers = coords.copy()
         else:
-            # K-Means clustering to find k_m representative centers
-            kmeans = KMeans(n_clusters=k_m, random_state=0)
-            kmeans.fit(coords)
-            cluster_centers = kmeans.cluster_centers_
-        
-        # Round/convert to integer pixel coords
+            cu_kmeans = cuKMeans(n_clusters=k, init='random', max_iter=300, random_state=0)
+            cu_kmeans.fit(coords)
+            cluster_centers = cu_kmeans.cluster_centers_
         cluster_centers = cluster_centers.astype(np.int32)
-        
         mask_size.append(len(cluster_centers))
         all_prompts_list.append(cluster_centers)
     
-    # 5) Concatenate all prompt points across all masks
-    if len(all_prompts_list) > 0:
+    if all_prompts_list:
         all_prompts = np.concatenate(all_prompts_list, axis=0)
     else:
         all_prompts = np.zeros((0, 2), dtype=np.int32)
@@ -136,149 +103,165 @@ def visualize_mask_points(first_image_cv2, mask_points_list, cmap_name='rainbow'
     plt.savefig('mask_points')
     plt.close(fig)
 
-def merge_masks(masks, threshold=0.5):
+
+class UnionFind:
+    def __init__(self, size):
+        self.parent = list(range(size))
+    
+    def find(self, x):
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+    
+    def union(self, x, y):
+        fx = self.find(x)
+        fy = self.find(y)
+        if fx != fy:
+            self.parent[fy] = fx
+
+def merge_masks(masks: np.ndarray, threshold=0.5) -> np.ndarray:
     """
-    Merge masks in `masks` if they overlap more than `threshold` 
+    Merge masks in `masks` if they overlap more than `threshold`
     fraction of the smaller mask's area.
     
     Args:
-        masks (List[dict]): List of dicts, each containing:
-            - 'segmentation': (H, W) bool array
-            - 'area': float
-            - 'bbox': List or tuple [x_min, y_min, x_max, y_max]
-            - 'predicted_iou', 'point_coords', 'stability_score', 'crop_box' (optional)
+        masks (np.ndarray): A list of mask arrays.
         threshold (float): Overlap fraction w.r.t. the smaller area required to merge.
         
     Returns:
-        (List[dict]): A new list of merged mask dictionaries.
+        (np.ndarray): A new array of merged masks.
     """
-    # We iteratively try to merge until no merges happen in a full pass
-    merged = True
-    masks_out = masks[:]  # make a copy
-
-    while merged:
-        merged = False
-        new_masks = []
-        i = 0
-        while i < len(masks_out):
-            # Compare mask i with all subsequent masks to check potential merge
-            j = i + 1
-            has_merged = False
-            while j < len(masks_out):
-                if should_merge(masks_out[i], masks_out[j], threshold):
-                    # Merge these two
-                    merged_mask = merge_two_masks(masks_out[i], masks_out[j])
-                    new_masks.append(merged_mask)
-                    
-                    # Remove them from the list
-                    del masks_out[j]
-                    del masks_out[i]
-                    
-                    merged = True
-                    has_merged = True
-                    break  # break the inner loop
-                else:
-                    j += 1
-            
-            if not has_merged:
-                # If mask i did not merge with anything, keep it
-                new_masks.append(masks_out[i])
-                i += 1
-        
-        masks_out = new_masks
+    n = len(masks)
+    uf = UnionFind(n)
     
-    return masks_out
+    # Determine which masks should be merged
+    for i in range(n):
+        for j in range(i + 1, n):
+            if should_merge(masks[i], masks[j], threshold):
+                uf.union(i, j)
+    
+    # Group masks by their root parent
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for i in range(n):
+        root = uf.find(i)
+        groups[root].append(i)
+    
+    # Merge masks within each group
+    merged_masks = []
+    for group in groups.values():
+        # Merge all masks in the group into one
+        merged_seg = np.zeros_like(masks[group[0]], dtype=bool)
+        for idx in group:
+            merged_seg |= masks[idx]
+        merged_masks.append(merged_seg)
+    
+    return np.array(merged_masks)
 
-def should_merge(maskA, maskB, threshold=0.5):
+def should_merge(segA: np.ndarray, segB: np.ndarray, threshold=0.5):
     """
-    Decide if two masks should merge based on how large their overlap is 
+    Decide if two masks should merge based on how large their overlap is
     relative to the smaller mask's area.
     """
-    segA = maskA['segmentation']
-    segB = maskB['segmentation']
-    
     overlap = segA & segB
-    overlap_area = overlap.sum()
-    smaller_area = min(maskA['area'], maskB['area'])
+    overlap_area = np.sum(overlap)
+    smaller_area = min(np.sum(segA), np.sum(segB))
     
     if smaller_area == 0:
         return False
     
-    # Overlap ratio = overlap_area / area_of_smaller_mask
     overlap_ratio = overlap_area / smaller_area
-    return (overlap_ratio > threshold)
+    return overlap_ratio > threshold
 
-def merge_two_masks(maskA, maskB):
+
+def refine_masks(masks: List[np.ndarray], update = False) -> np.ndarray:
     """
-    Merge two masks' dicts into a single dict 
-    by taking the union of their 'segmentation'.
+    Refine the masks by first merging the overlapping masks, and then creating new masks
+    by finding the unmasked region. Any continuous unmasked region (no existing mask
+    separating it) is turned into a new mask if it has area >= 100 pixels.
+
+    Args:
+        masks: (n, H, W) masks generated by SAM (boolean or 0/1 float/uint)
+
+    Returns:
+        masks: (m, H, W) the refined set of masks, including newly added ones that cover
+               large continuous unmasked areas.
     """
-    segA = maskA['segmentation']
-    segB = maskB['segmentation']
+    # 1) Merge overlapping masks (depends on your implementation of merge_masks).
+    #    After this step, 'masks' should still be shape (n, H, W).
+    masks = merge_masks(masks, threshold=0.5)
     
-    # Union of A and B
-    new_seg = segA | segB
-    new_area = new_seg.sum()
+    
+    # Make sure masks are in [0,1] or boolean form
+    masks_bool = (masks > 0).astype(np.uint8)  # shape: (n, H, W)
+    
+    masks_bool = filter_masks(masks_bool, connectivity=8)
+    
 
-    # We can combine bounding boxes by taking min/max
-    bboxA = maskA.get('bbox', None)
-    bboxB = maskB.get('bbox', None)
-    new_bbox = _merge_bbox(bboxA, bboxB, new_seg.shape)  # see helper below
+    if update == False:
+        return masks_bool
+    
+    # 2) Find the union of these merged masks across the channel dimension
+    #    merged_union will be shape (H, W), indicating which pixels are covered by any mask.
+    merged_union = np.any(masks_bool, axis=0).astype(np.uint8)
+    
 
-    # predicted_iou, stability_score, etc.: pick a simple approach
-    predicted_iou = max(maskA.get('predicted_iou', 0), maskB.get('predicted_iou', 0))
-    stability_score = max(maskA.get('stability_score', 0), maskB.get('stability_score', 0))
+    # 3) Identify the unmasked region (pixels not covered by any mask)
+    unmasked_region:np.ndarray = (1 - merged_union).astype(np.uint8)
+    
+    # 4) Find connected components in the unmasked region
+    num_labels, labels = cv2.connectedComponents(unmasked_region, connectivity=8)
+    #   labels will have values from 0 .. num_labels-1, where 0 = background
 
-    # You could union 'point_coords' or discard it—depending on usage
-    point_coordsA = maskA.get('point_coords', [])
-    point_coordsB = maskB.get('point_coords', [])
-    new_point_coords = list(point_coordsA) + list(point_coordsB)
+    new_masks = []
+    for label_idx in range(1, num_labels):  # skip background = 0
+        region_mask = (labels == label_idx).astype(np.uint8)  # shape: (H, W)
+        # Only keep regions with size >= 100 pixels
+        if region_mask.sum() >= 1000:
+            new_masks.append(region_mask)
 
-    # Similarly, you can pick how to handle 'crop_box'
-    # For example, unify them or just pick the bigger region
-    new_crop_box = None
-    if 'crop_box' in maskA or 'crop_box' in maskB:
-        # Example: just unify them or pick whichever
-        new_crop_box = _merge_bbox(maskA.get('crop_box', None),
-                                   maskB.get('crop_box', None),
-                                   new_seg.shape)
+    # 5) Combine any newly found masks with the existing masks
+    if len(new_masks) == 0:
+        # No unmasked region large enough to become a new mask
+        return masks
+    else:
+        # Stack new masks along axis=0 to match shape (m, H, W)
+        new_masks = np.stack(new_masks, axis=0)  # shape: (k, H, W)
+        # Concatenate them with the existing (merged) masks
+        # Note that 'masks' might need to be cast to uint8 if it's float/bool
+        refined_masks = np.concatenate([masks_bool, new_masks], axis=0)
+        return refined_masks
 
-    merged_mask = {
-        'segmentation': new_seg,
-        'area': float(new_area),
-        'bbox': new_bbox,
-        'predicted_iou': predicted_iou,
-        'stability_score': stability_score,
-        'point_coords': new_point_coords,
-        'crop_box': new_crop_box
-    }
-    return merged_mask
 
-def _merge_bbox(bboxA, bboxB, shape):
+def filter_masks(masks, connectivity=8):
     """
-    Merge bounding boxes by taking min of x_min, y_min 
-    and max of x_max, y_max across both. 
-    If None, we compute from the segmentation as fallback.
+    Filters the input masks to retain only the largest continuous region.
+    
+    Parameters:
+        masks (numpy.ndarray): A 3D numpy array of shape (n, h, w) with dtype=bool.
+        connectivity (int): Specifies connectivity, either 4 or 8.
+        
+    Returns:
+        numpy.ndarray: The filtered masks with the same shape and dtype as input.
     """
-    # If both bboxes are None, we might compute from shape or from the segmentation
-    if bboxA is None and bboxB is None:
-        return None
-    if bboxA is None:
-        return bboxB
-    if bboxB is None:
-        return bboxA
-
-    # BBox format assumed: [x_min, y_min, x_max, y_max]
-    x_min = min(bboxA[0], bboxB[0])
-    y_min = min(bboxA[1], bboxB[1])
-    x_max = max(bboxA[2], bboxB[2])
-    y_max = max(bboxA[3], bboxB[3])
-
-    # Clip to the image boundary if needed
-    H, W = shape
-    x_min = max(x_min, 0)
-    y_min = max(y_min, 0)
-    x_max = min(x_max, W - 1)
-    y_max = min(y_max, H - 1)
-
-    return [x_min, y_min, x_max, y_max]
+    if connectivity == 8:
+        structure = np.ones((3,3), dtype=int)
+    elif connectivity == 4:
+        structure = np.array([[0,1,0], [1,1,1], [0,1,0]], dtype=int)
+    else:
+        raise ValueError("Connectivity must be 4 or 8.")
+    
+    for i in range(len(masks)):
+        mask = masks[i]
+        labeled_array, num_features = ndimage.label(mask, structure=structure)
+        if num_features == 0:
+            continue  # mask is all False, no action needed
+        # Calculate sizes of each component
+        component_sizes = ndimage.sum(mask, labeled_array, index=np.arange(1, num_features+1))
+        # Find the label of the largest component
+        largest_component_label = np.argmax(component_sizes) + 1  # labels start at 1
+        # Create a mask with only the largest component
+        filtered_mask = (labeled_array == largest_component_label)
+        # Update the original mask
+        masks[i] = filtered_mask
+    return masks

@@ -1,7 +1,9 @@
 import torch
 import numpy as np
-from segment_anything import SamPredictor
+from segment_anything import SamPredictor, SamAutomaticMaskGenerator
 from scipy.spatial.distance import cdist  # for distance matrix
+from utils.masks import distribute_points_among_masks, refine_masks
+from utils.visualization import visualize_masks
 
 
 from typing import List, Dict, Tuple
@@ -111,13 +113,95 @@ def prompt_sam_with_mask_points(image_cv2: np.ndarray,
     return final_masks
 
 
+def prompt_sam_with_mask(image: np.ndarray, 
+                         points_correspondace: np.ndarray,
+                         sam,
+                         predictor: SamPredictor, 
+                         previous_mask: np.ndarray | None, 
+                         first_image: np.ndarray | None = None,
+                         multimask_output=True,
+                         update = False,
+                         ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    This function is used to prompt SAM with mask, and generate the mask for the next image.
+    
+    The mask will be first calculate throughly to find unmasked region and masked region. 
+    We will treat unmasked and continuous region as a new mask, and generate some new prompt points for segmentation.
+    
+    If this is the first image, the mask should be set None, first image should be set to the first image of the image
+    multimask_output will set to True
+    
+    Args:
+        image: (H, W, 3) BGR or RGB image loaded via cv2.
+        previous_mask: (H, W) mask of the previous image
+        points_correspondace: (N, 2) array of [x, y] coordinates for the points in the previous image
+        predictor: A SamPredictor with set_image() already called, or do it here.
+        first_image: (H, W, 3) BGR or RGB image loaded via cv2. If this is the first image, first_image should be set to the first image of the image
+        multimask_output: If False, returns a single mask per group. 
+                          If True, returns 3 masks per group by default.
+    Returns:
+        final_masks: A list of dict or np.ndarray (depending on SAM version),
+                     each entry being the mask(s) for that group of points.
+                     If `multimask_output=False`, you'll have len(final_masks) == number of groups.
+        new_mask_points_list_0: List of np.ndarray, each array is shape (k_i, 2). Points coordinates for each mask in the first image.
+        new_mask_points_list_1: List of np.ndarray, each array is shape (k_i, 2). Points coordinates for each mask in the second image.
+    """
+    
+    # If predictor image not set, do it now:
+    if previous_mask is None: # first image 
+        predictor.set_image(first_image)
+        sam_automatic = SamAutomaticMaskGenerator(
+            model=sam,
+            points_per_side=5,
+            pred_iou_thresh=0.90,
+            crop_n_layers=1,
+            crop_n_points_downscale_factor=2,
+            min_mask_region_area=9000,
+        )
+        previous_mask = sam_automatic.generate(first_image)
+        
+        
+        for i, mask in enumerate(previous_mask):
+            previous_mask[i] = mask['segmentation']
+        
+        previous_mask = refine_masks(previous_mask)
+        
+    # normally, we set the second image 
+    predictor.set_image(image)
+    mask_sizes, centers_first_img = distribute_points_among_masks(previous_mask)
 
-# Suppose we already have:
-# mask_points_list: List[np.ndarray], each array is shape (k_i, 2)
-# recovered_coords_0: (N, 2) array of reference points in the first image
-# recovered_coords_1: (N, 2) array of the corresponding points in the second image
+    new_mask_points_list_0, new_mask_points_list_1 = find_corresponding_neighbors(centers_first_img, 
+                                                                                mask_sizes, 
+                                                                                points_correspondace[1], 
+                                                                                points_correspondace[0])
+    
+    final_masks = []
+    for points in new_mask_points_list_1:
+        if len(points) == 0:
+            # skip empty group
+            final_masks.append(None)
+            continue
 
-# 1) Flatten all mask prompts into a single array
+        # SAM expects coords in (y, x) format
+        sam_input_points = np.stack([ [pt[0], pt[1]] for pt in points ], axis=0)
+        labels = np.ones((len(sam_input_points),), dtype=np.int32)  # all foreground
+
+        masks, scores, logits = predictor.predict(
+            point_coords=sam_input_points,
+            point_labels=labels,
+            multimask_output=multimask_output
+        )
+        
+        # If multimask_output=False, `masks` is shape [H, W]
+        # If True, shape [3, H, W]
+        # We'll store them in final_masks.  You can also store `scores` if needed.
+        final_masks.append(masks.squeeze(0) if not multimask_output else masks)
+    
+    final_masks = np.vstack(final_masks)
+    final_masks = refine_masks(final_masks, update=update)
+    
+    return final_masks, new_mask_points_list_0, new_mask_points_list_1 # last two variable is used for debugging
+    
 
 def find_corresponding_neighbors(flatten_points: np.ndarray, 
                                  mask_sizes: List[int], 
